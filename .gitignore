@@ -1,6 +1,11 @@
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
 
+### custom ###
+
+shap_e_model_cache/
+
+
 ### Python ###
 # Byte-compiled / optimized / DLL files
 __pycache__/
