@@ -206,12 +206,39 @@ class GaussianDreamer(BaseLift3DSystem):
         adjusment += center_offset
         return adjusment,rgb,0.5
     
+    def load_ply_only_vertex(self):
+        plydata = PlyData.read(self.load_path)
+        vertices = plydata["vertex"]
+        
+        x_mean = np.mean(vertices["x"])
+        y_mean = np.mean(vertices["y"])
+        z_mean = np.mean(vertices["z"])
+        
+        coords = np.vstack(
+            [vertices["x"], vertices["y"], vertices["z"]]
+        ).T
+        coords -= np.array([x_mean, y_mean, z_mean])
+
+        if vertices.__contains__("red"):
+            rgb = (
+                np.vstack(
+                    [vertices["red"], vertices["green"], vertices["blue"]]
+                ).T
+                / 255.0
+            )
+        else:
+            shs = np.random.random((coords.shape[0], 3)) / 255.0
+            rgb = SH2RGB(shs)
+        return coords, rgb, 1
+
     def pcb(self):
         # Since this data set has no colmap data, we start with random points
         if self.load_type==0:
             coords,rgb,scale = self.shape()
         elif self.load_type==1:
             coords,rgb,scale = self.smpl()
+        elif self.load_type == 2:
+            coords,rgb,scale = self.load_ply_only_vertex()
         else:
             raise NotImplementedError
         
