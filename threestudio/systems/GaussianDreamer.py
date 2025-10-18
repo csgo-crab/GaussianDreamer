@@ -41,12 +41,12 @@ class GaussianDreamer(BaseLift3DSystem):
     def pcd_init(self) -> BasicPointCloud:
         """加载点云数据, 并处理成3dgs的点云格式"""
         # Since this data set has no colmap data, we start with random points
-        if self.load_type== 0: # shap_e
-            from threestudio.systems.function.point_cloud import load_from_shape
-            coords,rgb = load_from_shape(self.load_path)
-        elif self.load_type == 1: # pcd
+        if self.load_type == 0: # pcd
             from threestudio.systems.function.point_cloud import load_from_pcd
             coords,rgb = load_from_pcd(self.load_path)
+        elif self.load_type== 1: # shap_e
+            from threestudio.systems.function.point_cloud import load_from_shape
+            coords,rgb = load_from_shape(self.cfg.prompt_processor.prompt) 
         elif self.load_type == 2: # smpl
             from threestudio.systems.function.point_cloud import load_from_smpl
             coords,rgb = load_from_smpl(self.load_path)
@@ -54,7 +54,7 @@ class GaussianDreamer(BaseLift3DSystem):
             from threestudio.systems.function.point_cloud import load_from_3dgs
             coords,rgb = load_from_3dgs(self.load_path)
         else:
-            raise NotImplementedError(f"load_type {self.load_type} is not implemented, only support [0: shap_e, 1: pcd, 2: smpl, 3: 3dgs]")
+            raise NotImplementedError(f"load_type {self.load_type} is not implemented, only support [0: pcd, 1: shap_e, 2: smpl, 3: 3dgs]")
         
         bound = self.radius * 0.75
         pcd = BasicPointCloud(points=coords*bound, colors=rgb, normals=np.zeros((coords.shape[0], 3)))

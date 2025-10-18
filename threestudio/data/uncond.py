@@ -50,7 +50,8 @@ def pose_spherical(theta, phi, radius):
     c2w = trans_t(radius)
     c2w = rot_phi(phi/180.*np.pi) @ c2w
     c2w = rot_theta(theta/180.*np.pi) @ c2w
-    c2w = torch.Tensor(np.array([[-1,0,0,0],[0,0,1,0],[0,1,0,0],[0,0,0,1]])) @ c2w
+    # 移除则为标准的点云xyz坐标系, 加上则为y轴为高的坐标系
+    # c2w = torch.Tensor(np.array([[-1,0,0,0],[0,0,1,0],[0,1,0,0],[0,0,0,1]])) @ c2w # 将 Y 和 Z 轴互换;把 X 轴反向;
     return c2w
 
 @dataclass

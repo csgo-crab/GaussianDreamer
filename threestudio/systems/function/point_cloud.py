@@ -53,7 +53,7 @@ def load_from_pcd(load_path:str):
     """从基础的点云文件加载数据
     
     Returns:
-        tuple: 包含点云坐标和RGB颜色的元组, 形状分别为 (N, 3) 和 (N, 3)
+        tuple: 包含点云坐标(中心移动无归一化)和RGB颜色(0-1归一化)的元组, 形状分别为 (N, 3) 和 (N, 3)
     """
     plydata = PlyData.read(load_path)
     
@@ -184,7 +184,7 @@ def load_from_3dgs(load_path:str):
     return xyz, color
 
 
-def save_ply(path, xyz, rgb):
+def save_ply(path:str, xyz:np.ndarray, rgb:np.ndarray):
     """保存点云到ply文件"""
     # Define the dtype for the structured array
     dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
@@ -192,6 +192,11 @@ def save_ply(path, xyz, rgb):
             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
     
     normals = np.zeros_like(xyz)
+
+    # 检查颜色数值，放缩回0-255
+    max_rgb_value = np.max(rgb)
+    if max_rgb_value <= 10.0:
+        rgb = (_SH2RGB(rgb) * 255).clip(0, 255).astype(np.uint8)  # 确保值在有效范围内
 
     elements = np.empty(xyz.shape[0], dtype=dtype)
     attributes = np.concatenate((xyz, normals, rgb), axis=1)
