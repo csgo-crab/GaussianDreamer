@@ -12,6 +12,12 @@ import open3d as o3d
 from plyfile import PlyData, PlyElement
 
 # ================== 点云处理相关 ==========================
+def load_from_vggt(prompt:str):
+    """先用mvadapter生成多视角图片,然后用vggt生成稀疏点云"""
+    pass
+    
+
+
 def add_points(coords:np.ndarray, rgb:np.ndarray, num_points=1000000):
     """
     向点云添加随机点, 一定阈值范围内增密
@@ -220,3 +226,51 @@ def _SH2RGB(sh:np.ndarray):
     """
     C0 = 0.28209479177387814
     return sh * C0 + 0.5
+
+def predictions_to_pointcloud(
+    predictions: dict,
+    conf_thres: float = 50.0,
+    mask_black_bg: bool = False,
+    mask_white_bg: bool = False,
+    prediction_mode: str = "Predicted Pointmap",
+):
+    """提取预测点云的通用函数"""
+    if not isinstance(predictions, dict):
+        raise ValueError("predictions 必须是一个字典")
+
+    if "Pointmap" in prediction_mode and "world_points" in predictions:
+        world_points = predictions["world_points"]
+        conf = predictions.get("world_points_conf", np.ones_like(world_points[..., 0]))
+    else:
+        world_points = predictions["world_points_from_depth"]
+        conf = predictions.get("depth_conf", np.ones_like(world_points[..., 0]))
+
+    images = predictions["images"]
+
+    if images.ndim == 4 and images.shape[1] == 3:
+        images = np.transpose(images, (0, 2, 3, 1))
+
+    coords = world_points.reshape(-1, 3)
+    coords[..., 1:] *= -1
+    
+    rgb = (images.reshape(-1, 3) * 255).astype(np.uint8)
+    conf = conf.reshape(-1)
+
+    conf_threshold = np.percentile(conf, conf_thres) if conf_thres > 0 else 0.0
+    mask = (conf >= conf_threshold) & (conf > 1e-5)
+
+    if mask_black_bg:
+        black_mask = rgb.sum(axis=1) >= 16
+        mask &= black_mask
+    if mask_white_bg:
+        white_mask = ~((rgb[:, 0] > 240) & (rgb[:, 1] > 240) & (rgb[:, 2] > 240))
+        mask &= white_mask
+
+    coords = coords[mask]
+    rgb = rgb[mask]
+
+    if coords.size == 0:
+        coords = np.array([[0.0, 0.0, 0.0]])
+        rgb = np.array([[255, 255, 255]], dtype=np.uint8)
+
+    return coords, rgb
