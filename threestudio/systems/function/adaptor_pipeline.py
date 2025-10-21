@@ -10,7 +10,7 @@ from mvadapter.utils.mesh_utils import get_orthogonal_camera
 
 
 @dataclass
-class PipelineConfig:
+class MVAdapterPipelineConfig:
     # 模型参数
     base_model: str = "load/stabilityai/stable-diffusion-xl-base-1.0"
     vae_model: str = "load/madebyollin/sdxl-vae-fp16-fix"
@@ -27,23 +27,27 @@ class PipelineConfig:
     num_inference_steps: int = 50
     guidance_scale: float = 7.0
     seed: int = -1
-    lora_scale: list[str] | str = "1.0"
-
-    # 输出参数
+    lora_scale: list[str] = field(default_factory=lambda: ["1.0"])
     height: int = 768
     width: int = 768
+
+    # 输出参数
     output: str = "output.png"
     save_alone: bool = False
 
     # 设备与精度
     device: str = "cuda"
-    dtype: torch.dtype = torch.float16
+    dtype: str = "float16"
 
 
 class MVAdapterPipeline:
-    def __init__(self, cfg: PipelineConfig):
+    def __init__(self, cfg: MVAdapterPipelineConfig):
         self.cfg = cfg
         self.pipe, self.adapter_name_list = self._prepare_pipeline()
+        
+    def __del__(self):
+        del self.pipe
+        torch.cuda.empty_cache()
 
     def _prepare_pipeline(self):
         """加载模型与adapter"""
@@ -84,9 +88,10 @@ class MVAdapterPipeline:
 
         pipe.init_custom_adapter(num_views=cfg.num_views)
         pipe.load_custom_adapter(cfg.adapter_path, weight_name="mvadapter_t2mv_sdxl.safetensors")
-
-        pipe.to(device=cfg.device, dtype=cfg.dtype)
-        pipe.cond_encoder.to(device=cfg.device, dtype=cfg.dtype)
+        # Convert string dtype to torch.dtype
+        torch_dtype = getattr(torch, cfg.dtype) if hasattr(torch, cfg.dtype) else torch.float16
+        pipe.to(device=cfg.device, dtype=torch_dtype)
+        pipe.cond_encoder.to(device=cfg.device, dtype=torch_dtype)
 
         # 加载LoRA
         adapter_name_list = []
@@ -161,14 +166,3 @@ class MVAdapterPipeline:
         torch.cuda.empty_cache()
         print(f"✅ 输出已保存到: {cfg.output}")
         return images
-
-
-if __name__ == "__main__":
-    # 示例调用
-    cfg = PipelineConfig(
-        text="a cute crab wearing sunglasses, high detail",
-        output="test_output.png",
-        seed=42
-    )
-    pipeline = MVAdapterPipeline(cfg)
-    pipeline.run()

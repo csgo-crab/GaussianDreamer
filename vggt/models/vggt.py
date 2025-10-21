@@ -26,7 +26,9 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
 
-    def forward(self, images: torch.Tensor, query_points: torch.Tensor = None):
+    def forward(self, images: torch.Tensor, camera_extrinsics: torch.Tensor = None,
+            camera_intrinsics: torch.Tensor = None, query_points: torch.Tensor = None):
+
         """
         Forward pass of the VGGT model.
 
@@ -64,9 +66,13 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
 
         with torch.cuda.amp.autocast(enabled=False):
             if self.camera_head is not None:
-                pose_enc_list = self.camera_head(aggregated_tokens_list)
-                predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
-                predictions["pose_enc_list"] = pose_enc_list
+                if camera_extrinsics is not None:
+                    # 用户显式提供相机姿态时，直接使用
+                    pose_enc_list = [self.encode_extrinsics(camera_extrinsics)]
+                else:
+                    # 否则模型自行预测
+                    pose_enc_list = self.camera_head(aggregated_tokens_list)
+                predictions["pose_enc"] = pose_enc_list[-1]
                 
             if self.depth_head is not None:
                 depth, depth_conf = self.depth_head(
@@ -95,3 +101,15 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
 
         return predictions
 
+    def encode_extrinsics(self, extrinsics: torch.Tensor):
+        """
+        6D rotation + 3D translation → pose_enc [B, S, 9]
+        extrinsics: [B, S, 4, 4]
+        """
+        B, S, _, _ = extrinsics.shape
+        R_mat = extrinsics[:, :, :3, :3]      # [B,S,3,3]
+        t = extrinsics[:, :, :3, 3]           # [B,S,3]
+
+        R_6d = R_mat[:, :, :, :2].reshape(B, S, 6)  # 前两列 → 6D
+        pose_enc = torch.cat([R_6d, t], dim=-1)     # [B,S,9]
+        return pose_enc

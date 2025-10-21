@@ -199,6 +199,9 @@ class BaseLift3DSystem(BaseSystem):
         background_type: str = ""
         background: dict = field(default_factory=dict)
 
+        mv_adapter_pipeline: dict = field(default_factory=dict)
+        vggt_pipeline: dict = field(default_factory=dict)
+
         renderer_type: str = ""
         renderer: dict = field(default_factory=dict)
 
