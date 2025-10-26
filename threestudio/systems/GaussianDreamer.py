@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from argparse import ArgumentParser, Namespace
@@ -55,7 +56,8 @@ class GaussianDreamer(BaseLift3DSystem):
             coords,rgb = load_from_3dgs(self.load_path)
         elif self.load_type == 0: # vggt
             from threestudio.systems.function.point_cloud import load_from_vggt
-            coords,rgb = load_from_vggt(self.cfg)
+            save_path = self.get_save_path('instance_images/')
+            coords,rgb = load_from_vggt(self.cfg, save_path)
         else:
             raise NotImplementedError(f"load_type {self.load_type} is not implemented, only support [0: shap_e, 1: pcd, 2: smpl, 3: 3dgs]")
         
@@ -65,11 +67,44 @@ class GaussianDreamer(BaseLift3DSystem):
     
     def on_fit_start(self) -> None:
         super().on_fit_start()
+
+        # 如果本地存在instance image, 则可以finetune
+        if os.path.exists(os.path.join(self.get_save_dir(), 'instance_images/')):
+            # finetune guidance(需要本地下载好模型)
+            cmd = [
+                "python", "threestudio/systems/function/dreambooth.py",
+                "--pretrained_model_name_or_path", self.cfg.guidance.pretrained_model_name_or_path,
+                "--enable_xformers_memory_efficient_attention",
+                "--with_prior_preservation",
+                "--instance_data_dir", self.get_save_path('instance_images/'),
+                "--instance_prompt", self.cfg.prompt_processor.prompt,
+                "--class_data_dir", self.get_save_path('class_samples/'),
+                "--class_prompt", self.cfg.prompt_processor.prompt.replace('<kth>', ''),
+                "--validation_prompt", self.cfg.prompt_processor.prompt,
+                "--output_dir", self.get_save_path('personalization/'),
+                "--max_train_steps", str(4000),
+                "--train_batch_size", str(1),
+                "--gradient_accumulation_steps", str(4),
+                "--mixed_precision", "fp16"
+            ]
+            # 执行dreambooth训练
+            import subprocess
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                print("DreamBooth训练成功完成")
+                print(result.stdout)
+                if result.returncode != 0:
+                    raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+            except subprocess.CalledProcessError as e:
+                print("DreamBooth训练失败")
+                print(f"错误输出: {e.stderr}")
+                print(f"返回码: {e.returncode}")
+        
         # only used in training
         self.prompt_processor = threestudio.find(self.cfg.prompt_processor_type)(
-            self.cfg.prompt_processor
+            self.get_save_path('personalization/')
         )
-        self.guidance = threestudio.find(self.cfg.guidance_type)(self.cfg.guidance)
+        self.guidance = threestudio.find(self.cfg.guidance_type)(self.get_save_path('personalization/'))
 
     def configure_optimizers(self):
         self.parser = ArgumentParser(description="Training script parameters")

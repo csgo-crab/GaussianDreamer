@@ -10,8 +10,6 @@ import torch
 import numpy as np
 import open3d as o3d
 from plyfile import PlyData, PlyElement
-from .adaptor_pipeline import MVAdapterPipeline
-from .vggt_pipeline import VGGTPipeline, VGGTPipelineConfig
 import math
 from scipy.spatial.transform import Rotation as R
 
@@ -140,9 +138,26 @@ def load_from_shape(prompt:str, save_gif_path:str = None):
     skip = 1
     coords = pc.verts
     rgb = np.concatenate([pc.vertex_channels['R'][:,None],pc.vertex_channels['G'][:,None],pc.vertex_channels['B'][:,None]],axis=1) 
-
     coords = coords[::skip]
     rgb = rgb[::skip]
+
+    # 规整到[-1, 1]
+    coords = coords[:, [0,2,1]]
+    x_length = np.max(coords[:,0]) - np.min(coords[:,0])
+    y_length = np.max(coords[:,1]) - np.min(coords[:,1])
+    z_length = np.max(coords[:,2]) - np.min(coords[:,2])
+    max_length = max(x_length, y_length, z_length)
+    coords /= max_length
+    x_mean = np.mean(coords[:, 0])
+    y_mean = np.mean(coords[:, 1])
+    z_mean = np.mean(coords[:, 2])
+    coords -= np.array([x_mean, y_mean, z_mean])
+
+    increase_pts_num = 1000000 - coords.shape[0]
+    if increase_pts_num > 0:
+        new_pts, new_rgb = add_points(coords, rgb, increase_pts_num)
+        coords = np.concatenate([coords, new_pts], axis=0)
+        rgb = np.concatenate([rgb, new_rgb], axis=0)
     return coords, rgb
 
 def load_from_smpl(load_path:str, num_pts = 50000):
@@ -216,7 +231,7 @@ def save_ply(path:str, xyz:np.ndarray, rgb:np.ndarray):
     ply_data.write(path)
 
 
-def load_from_vggt(cfg):
+def load_from_vggt(cfg, save_path:str = None):
     """先用mvadapter生成多视角图片,然后用vggt生成稀疏点云
     
     Args:
@@ -228,12 +243,15 @@ def load_from_vggt(cfg):
     from threestudio.systems.function.adaptor_pipeline import MVAdapterPipeline, MVAdapterPipelineConfig
     from threestudio.systems.function.vggt_pipeline import VGGTPipeline, VGGTPipelineConfig
     adapter_pipeline = MVAdapterPipeline(cfg.mv_adapter_pipeline)
-    vggt_pipeline = VGGTPipeline(cfg.vggt_pipeline)
-    
     images = adapter_pipeline.run()
+    if save_path is not None:
+        import os
+        for i, image in enumerate(images):
+            image.save(os.path.join(save_path, f"{i}.png"))
     del adapter_pipeline
-    coords, rgb = vggt_pipeline.run(images)
 
+    vggt_pipeline = VGGTPipeline(cfg.vggt_pipeline)
+    coords, rgb = vggt_pipeline.run(images)
     del vggt_pipeline
 
     x_mean = np.mean(coords[:, 0])
