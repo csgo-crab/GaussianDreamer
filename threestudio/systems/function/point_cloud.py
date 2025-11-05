@@ -251,7 +251,7 @@ def load_from_vggt(cfg, save_path:str = None):
     del adapter_pipeline
 
     vggt_pipeline = VGGTPipeline(cfg.vggt_pipeline)
-    coords, rgb = vggt_pipeline.run(images)
+    coords, rgb, conf = vggt_pipeline.run(images)
     del vggt_pipeline
 
     x_mean = np.mean(coords[:, 0])
@@ -260,7 +260,7 @@ def load_from_vggt(cfg, save_path:str = None):
     coords -= np.array([x_mean, y_mean, z_mean])    
     rgb = rgb / 255.0
 
-    return coords, rgb
+    return coords, rgb, conf
 
 
 # ================== 文件内部复用的一些小函数 ==========================

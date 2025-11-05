@@ -1,3 +1,4 @@
+import math
 from collections import defaultdict
 
 import numpy as np
@@ -216,11 +217,66 @@ def get_ray_directions(
     return directions
 
 
+def mask_ray_directions(H: int, W: int, s_H: int, s_W: int) -> Float[Tensor, "s_H s_W"]:
+    """
+    Masking the (H,W) image to (s_H,s_W), for efficient training at higher resolution image.
+    pixels from (s_H,s_W) are sampled more (1-aspect_ratio) than outside pixels(aspect_ratio).
+    the masking is deferred to before calling get_rays().
+    """
+    # indices_all = torch.meshgrid(
+    #     torch.arange(W, dtype=torch.float32) ,
+    #     torch.arange(H, dtype=torch.float32) ,
+    #     indexing="xy",
+    # )
+
+    indices_inner = torch.meshgrid(
+        torch.linspace(0, 0.75 * W, s_W, dtype=torch.int8),
+        torch.linspace(0, 0.75 * H, s_H, dtype=torch.int8),
+        indexing="xy",
+    )
+    offset = [torch.randint(0, W // 8 + 1, (1,)), torch.randint(0, H // 8 + 1, (1,))]
+
+    select_ind = indices_inner[0] + offset[0] + H * (indices_inner[1] + offset[1])
+
+    ### removing the random sampling approach, we sample in uniform grid
+    # mask = torch.zeros(H,W, dtype=torch.bool)
+    # mask[(H-s_H)//2 : H - math.ceil((H-s_H)/2),(W-s_W)//2 : W - math.ceil((W-s_W)/2)] = True
+
+    # in_ind_1d = (indices_all[0]+H*indices_all[1])[mask]
+    # out_ind_1d = (indices_all[0]+H*indices_all[1])[torch.logical_not(mask)]
+    # ### tried using 0.5 p ratio of sampling inside vs outside, as smaller area already
+    # ### leads to more samples inside anyways
+
+    # p = 0.5#(s_H*s_W)/(H*W)
+    # select_ind = in_ind_1d[
+    #     torch.multinomial(
+    #     torch.ones_like(in_ind_1d)*(1-p),int((1-p)*(s_H*s_W)),replacement=False)]
+    # select_ind = torch.concatenate(
+    #     [select_ind, out_ind_1d[torch.multinomial(
+    #         torch.ones_like(out_ind_1d)*(p),int((p)*(s_H*s_W)),replacement=False)]
+    #     ],
+    #     dim=0).to(dtype=torch.int).view(s_H,s_W)
+
+    ### first attempt at sampling, this produces variable number of rays,
+    ### so 4D tensor directions cant be sampled
+    # mask = torch.zeros(H,W, device= directions.device)
+    # p = (s_H*s_W)/(H*W)
+    # mask += p
+    # mask[(H-s_H)//2 : H - math.ceil((H-s_H)/2),(W-s_W)//2 : W - math.ceil((W-s_W)/2)] = 1 - p
+    # ### mask contains prob of individual pixel, drawing using Bernoulli dist
+    # mask = torch.bernoulli(mask).to(dtype=torch.bool)
+    ### postponing masking before get_rays is called
+    # directions = directions[mask]
+
+    return select_ind
+
+
 def get_rays(
     directions: Float[Tensor, "... 3"],
     c2w: Float[Tensor, "... 4 4"],
     keepdim=False,
     noise_scale=0.0,
+    normalize=True,
 ) -> Tuple[Float[Tensor, "... 3"], Float[Tensor, "... 3"]]:
     # Rotate ray directions from camera coordinate to the world coordinate
     assert directions.shape[-1] == 3
@@ -256,7 +312,8 @@ def get_rays(
         rays_o = rays_o + torch.randn(3, device=rays_o.device) * noise_scale
         rays_d = rays_d + torch.randn(3, device=rays_d.device) * noise_scale
 
-    rays_d = F.normalize(rays_d, dim=-1)
+    if normalize:
+        rays_d = F.normalize(rays_d, dim=-1)
     if not keepdim:
         rays_o, rays_d = rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
 
@@ -290,6 +347,69 @@ def get_mvp_matrix(
     # calculate mvp matrix by proj_mtx @ w2c (mv_mtx)
     mvp_mtx = proj_mtx @ w2c
     return mvp_mtx
+
+
+def get_full_projection_matrix(
+    c2w: Float[Tensor, "B 4 4"], proj_mtx: Float[Tensor, "B 4 4"]
+) -> Float[Tensor, "B 4 4"]:
+    return (c2w.unsqueeze(0).bmm(proj_mtx.unsqueeze(0))).squeeze(0)
+
+
+# gaussian splatting functions
+def convert_pose(C2W):
+    flip_yz = torch.eye(4, device=C2W.device)
+    flip_yz[1, 1] = -1
+    flip_yz[2, 2] = -1
+    C2W = torch.matmul(C2W, flip_yz)
+    return C2W
+
+
+def get_projection_matrix_gaussian(znear, zfar, fovX, fovY, device="cuda"):
+    tanHalfFovY = math.tan((fovY / 2))
+    tanHalfFovX = math.tan((fovX / 2))
+
+    top = tanHalfFovY * znear
+    bottom = -top
+    right = tanHalfFovX * znear
+    left = -right
+
+    P = torch.zeros(4, 4, device=device)
+
+    z_sign = 1.0
+
+    P[0, 0] = 2.0 * znear / (right - left)
+    P[1, 1] = 2.0 * znear / (top - bottom)
+    P[0, 2] = (right + left) / (right - left)
+    P[1, 2] = (top + bottom) / (top - bottom)
+    P[3, 2] = z_sign
+    P[2, 2] = z_sign * zfar / (zfar - znear)
+    P[2, 3] = -(zfar * znear) / (zfar - znear)
+    return P
+
+
+def get_fov_gaussian(P):
+    tanHalfFovX = 1 / P[0, 0]
+    tanHalfFovY = 1 / P[1, 1]
+    fovY = math.atan(tanHalfFovY) * 2
+    fovX = math.atan(tanHalfFovX) * 2
+    return fovX, fovY
+
+
+def get_cam_info_gaussian(c2w, fovx, fovy, znear, zfar):
+    c2w = convert_pose(c2w)
+    world_view_transform = torch.inverse(c2w)
+
+    world_view_transform = world_view_transform.transpose(0, 1).cuda().float()
+    projection_matrix = (
+        get_projection_matrix_gaussian(znear=znear, zfar=zfar, fovX=fovx, fovY=fovy)
+        .transpose(0, 1)
+        .cuda()
+    )
+    full_proj_transform = (
+        world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))
+    ).squeeze(0)
+    camera_center = world_view_transform.inverse()[3, :3]
+    return world_view_transform, full_proj_transform, camera_center
 
 
 def binary_cross_entropy(input, target):

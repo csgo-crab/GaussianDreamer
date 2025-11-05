@@ -13,8 +13,9 @@ from gaussiansplatting.scene.gaussian_model import BasicPointCloud
 
 import threestudio
 from threestudio.systems.base import BaseLift3DSystem
-from threestudio.utils.ops import binary_cross_entropy
+from threestudio.utils.ops import binary_cross_entropy,dot
 from threestudio.utils.typing import *
+from threestudio.utils.loss import tv_loss
 
 
 @threestudio.register("gaussiandreamer-system")
@@ -25,7 +26,6 @@ class GaussianDreamer(BaseLift3DSystem):
         sh_degree: int = 0
         load_type: int = 0
         load_path: str = "./load/shapes/stand.obj"
-
 
     # ================== 初始化相关 ==========================
     cfg: Config
@@ -41,6 +41,8 @@ class GaussianDreamer(BaseLift3DSystem):
 
     def pcd_init(self) -> BasicPointCloud:
         """加载点云数据, 并处理成3dgs的点云格式"""
+        coords,rgb,conf = None,None,None
+
         # Since this data set has no colmap data, we start with random points
         if self.load_type== 4: # shap_e
             from threestudio.systems.function.point_cloud import load_from_shape
@@ -57,54 +59,67 @@ class GaussianDreamer(BaseLift3DSystem):
         elif self.load_type == 0: # vggt
             from threestudio.systems.function.point_cloud import load_from_vggt
             save_path = self.get_save_path('instance_images/')
-            coords,rgb = load_from_vggt(self.cfg, save_path)
+            coords,rgb,conf = load_from_vggt(self.cfg, save_path)
         else:
             raise NotImplementedError(f"load_type {self.load_type} is not implemented, only support [0: shap_e, 1: pcd, 2: smpl, 3: 3dgs]")
-        
-        bound = self.radius * 0.75
-        pcd = BasicPointCloud(points=coords*bound, colors=rgb, normals=np.zeros((coords.shape[0], 3)))
+        if conf is None:
+            conf = np.ones((coords.shape[0]))
+        # bound = self.radius * 0.75
+        x_length = np.max(coords[:, 0]) - np.min(coords[:, 0])
+        y_length = np.max(coords[:, 1]) - np.min(coords[:, 1])
+        z_length = np.max(coords[:, 2]) - np.min(coords[:, 2])
+        max_length = max(x_length, y_length, z_length)
+        ratio = self.radius / max_length
+
+        pcd = BasicPointCloud(points=coords*ratio, colors=rgb, normals=np.zeros((coords.shape[0], 3)), confidences=conf)
+
         return pcd
     
     def on_fit_start(self) -> None:
         super().on_fit_start()
 
-        # 如果本地存在instance image, 则可以finetune
-        if os.path.exists(os.path.join(self.get_save_dir(), 'instance_images/')):
-            # finetune guidance(需要本地下载好模型)
-            cmd = [
-                "python", "threestudio/systems/function/dreambooth.py",
-                "--pretrained_model_name_or_path", self.cfg.guidance.pretrained_model_name_or_path,
-                "--enable_xformers_memory_efficient_attention",
-                "--with_prior_preservation",
-                "--instance_data_dir", self.get_save_path('instance_images/'),
-                "--instance_prompt", self.cfg.prompt_processor.prompt,
-                "--class_data_dir", self.get_save_path('class_samples/'),
-                "--class_prompt", self.cfg.prompt_processor.prompt.replace('<kth>', ''),
-                "--validation_prompt", self.cfg.prompt_processor.prompt,
-                "--output_dir", self.get_save_path('personalization/'),
-                "--max_train_steps", str(4000),
-                "--train_batch_size", str(1),
-                "--gradient_accumulation_steps", str(4),
-                "--mixed_precision", "fp16"
-            ]
-            # 执行dreambooth训练
-            import subprocess
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                print("DreamBooth训练成功完成")
-                print(result.stdout)
-                if result.returncode != 0:
-                    raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-            except subprocess.CalledProcessError as e:
-                print("DreamBooth训练失败")
-                print(f"错误输出: {e.stderr}")
-                print(f"返回码: {e.returncode}")
+        # # 如果本地存在instance image, 则可以finetune
+        # if os.path.exists(os.path.join(self.get_save_dir(), 'instance_images/')):
+        #     # finetune guidance(需要本地下载好模型)
+        #     cmd = [
+        #         "python", "threestudio/systems/function/dreambooth.py",
+        #         "--pretrained_model_name_or_path", self.cfg.guidance.pretrained_model_name_or_path,
+        #         "--enable_xformers_memory_efficient_attention",
+        #         "--with_prior_preservation",
+        #         "--instance_data_dir", self.get_save_path('instance_images/'),
+        #         "--instance_prompt", self.cfg.prompt_processor.prompt,
+        #         "--class_data_dir", self.get_save_path('class_samples/'),
+        #         "--class_prompt", self.cfg.prompt_processor.prompt.replace('<kth>', ''),
+        #         "--validation_prompt", self.cfg.prompt_processor.prompt,
+        #         "--output_dir", self.get_save_path('personalization/'),
+        #         "--max_train_steps", str(4000),
+        #         "--train_batch_size", str(1),
+        #         "--gradient_accumulation_steps", str(4),
+        #         "--mixed_precision", "fp16"
+        #     ]
+        #     # 执行dreambooth训练
+        #     import subprocess
+        #     try:
+        #         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        #         print("DreamBooth训练成功完成")
+        #         print(result.stdout)
+        #         if result.returncode != 0:
+        #             raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+        #     except subprocess.CalledProcessError as e:
+        #         print("DreamBooth训练失败")
+        #         print(f"错误输出: {e.stderr}")
+        #         print(f"返回码: {e.returncode}")
         
-        # only used in training
+        # # only used in training
+        # self.prompt_processor = threestudio.find(self.cfg.prompt_processor_type)(
+        #     self.get_save_path('personalization/')
+        # )
+        # self.guidance = threestudio.find(self.cfg.guidance_type)(self.get_save_path('personalization/'))
         self.prompt_processor = threestudio.find(self.cfg.prompt_processor_type)(
-            self.get_save_path('personalization/')
+            self.cfg.prompt_processor
         )
-        self.guidance = threestudio.find(self.cfg.guidance_type)(self.get_save_path('personalization/'))
+        self.guidance = threestudio.find(self.cfg.guidance_type)(self.cfg.guidance)
+        self.prompt_utils = self.prompt_processor()
 
     def configure_optimizers(self):
         self.parser = ArgumentParser(description="Training script parameters")
@@ -174,38 +189,45 @@ class GaussianDreamer(BaseLift3DSystem):
 
         out = self(batch) 
 
-        prompt_utils = self.prompt_processor()
+        
         images = out["comp_rgb"]
 
         guidance_eval = (self.true_global_step % 200 == 0)        
         guidance_out = self.guidance(
-            images, prompt_utils, **batch, rgb_as_latents=False,guidance_eval=guidance_eval
+            images, self.prompt_utils, **batch, rgb_as_latents=False,guidance_eval=guidance_eval
         )
         
-        loss = 0.0
-        loss = loss + guidance_out['loss_sds'] *self.C(self.cfg.loss['lambda_sds'])
         
-        loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
-        self.log("train/loss_sparsity", loss_sparsity)
-        loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
+        # loss = 0.0
 
-        opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
-        loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
-        self.log("train/loss_opaque", loss_opaque)
-        loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
         
-        if guidance_eval:
-            self.guidance_evaluation_save(
-                out["comp_rgb"].detach()[: guidance_out["eval"]["bs"]],
-                guidance_out["eval"],
-            )
+        # loss = loss + guidance_out['loss_sds'] *self.C(self.cfg.loss['lambda_sds'])
+        # loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
+        # self.log("train/loss_sparsity", loss_sparsity)
+        # loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
+
+        # opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
+        # loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
+        # self.log("train/loss_opaque", loss_opaque)
+        # loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
+        loss = self.compute_vsd_loss(guidance_out,out)
+        
+        
+        
+        
+        # if guidance_eval:
+        #     self.guidance_evaluation_save(
+        #         out["comp_rgb"].detach()[: guidance_out["eval"]["bs"]],
+        #         guidance_out["eval"],
+        #     )
         for name, value in self.cfg.loss.items():
             self.log(f"train_params/{name}", self.C(value))
+        self.log(f"train/loss", loss)
         return {"loss": loss}
 
     def on_before_optimizer_step(self, optimizer):
         with torch.no_grad():
-            if self.true_global_step < 900: # 15000
+            if self.true_global_step < 900: # 1200
                 viewspace_point_tensor_grad = torch.zeros_like(self.viewspace_point_list[0])
                 for idx in range(len(self.viewspace_point_list)):
                     viewspace_point_tensor_grad = viewspace_point_tensor_grad + self.viewspace_point_list[idx].grad
@@ -216,7 +238,7 @@ class GaussianDreamer(BaseLift3DSystem):
 
                 if self.true_global_step > 300 and self.true_global_step % 100 == 0: # 500 100
                     size_threshold = 20 if self.true_global_step > 500 else None # 3000
-                    self.gaussian.densify_and_prune(0.0002 , 0.05, self.cameras_extent, size_threshold) 
+                    self.gaussian.densify_and_prune(0.0002 , 0.05, self.cameras_extent, size_threshold)
 
 
     # ================== 验证测试相关 ==========================
@@ -256,9 +278,13 @@ class GaussianDreamer(BaseLift3DSystem):
             name="validation_step",
             step=self.true_global_step,
         )
+        
         # save_path = self.get_save_path(f"it{self.true_global_step}-val.ply")
         # self.gaussian.save_ply(save_path)
-        # load_ply(save_path,self.get_save_path(f"it{self.true_global_step}-val-color.ply"))
+        # # 保存转换到rgb空间的点云
+        # from threestudio.systems.function.point_cloud import save_ply, load_from_3dgs
+        # coords, rgb = load_from_3dgs(save_path)
+        # save_ply(self.get_save_path(f"it{self.true_global_step}-val-color.ply"), coords, rgb)
 
     def on_validation_epoch_end(self):
         pass
@@ -375,4 +401,36 @@ class GaussianDreamer(BaseLift3DSystem):
         from threestudio.systems.function.point_cloud import save_ply, load_from_3dgs
         coords, rgb = load_from_3dgs(save_path)
         save_ply(self.get_save_path(f"it{self.true_global_step}-test-color.ply"), coords, rgb)
-        
+
+    def compute_sds_loss(self,guidance_out,out):
+        loss = 0.0
+
+        loss = loss + guidance_out['loss_sds'] *self.C(self.cfg.loss['lambda_sds'])
+        loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
+        self.log("train/loss_sparsity", loss_sparsity)
+        loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
+
+        opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
+        loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
+        self.log("train/loss_opaque", loss_opaque)
+        loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
+        return loss
+    
+    def compute_vsd_loss(self,guidance_out,out):
+        loss = 0.0
+        for name, value in guidance_out.items():
+            if not (type(value) is torch.Tensor and value.numel() > 1):
+                self.log(f"train/{name}", value)
+            if name.startswith("loss_"):
+                loss += value * self.C(self.cfg.loss[name.replace("loss_", "lambda_")])
+
+
+        loss_sparsity = (out["opacity"] ** 2 + 0.01).sqrt().mean()
+        self.log("train/loss_sparsity", loss_sparsity)
+        loss += loss_sparsity * self.C(self.cfg.loss.lambda_sparsity)
+
+        opacity_clamped = out["opacity"].clamp(1.0e-3, 1.0 - 1.0e-3)
+        loss_opaque = binary_cross_entropy(opacity_clamped, opacity_clamped)
+        self.log("train/loss_opaque", loss_opaque)
+        loss += loss_opaque * self.C(self.cfg.loss.lambda_opaque)
+        return loss
