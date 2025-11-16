@@ -1,6 +1,8 @@
 import os
+import math
 import torch
 import numpy as np
+import torch.nn.functional as F
 from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass, field
 
@@ -141,8 +143,11 @@ class GaussianDreamer(BaseLift3DSystem):
         save_ply(self.get_save_path(f"init-color.ply"), coords, rgb)
         # 准备训练
         self.pipe = PipelineParams(self.parser)
-        self.gaussian.training_setup(opt)
 
+        # 用初始化的 3DGS，沿一圈渲染几张图（相当于在 pcd init 之后立刻 test）
+        self.initial_views(num_views=64)
+
+        self.gaussian.training_setup(opt)
         ret = {
             "optimizer": self.gaussian.optimizer,
         }
@@ -215,8 +220,8 @@ class GaussianDreamer(BaseLift3DSystem):
     def on_before_optimizer_step(self, optimizer):
         with torch.no_grad():
             if self.true_global_step < 3000: # 原90
-                if self.true_global_step ==500 or self.true_global_step ==1000:
-                    self.gaussian.oneupSHdegree()
+                # if self.true_global_step ==500 or self.true_global_step ==1000:
+                #     self.gaussian.oneupSHdegree()
                 viewspace_point_tensor_grad = torch.zeros_like(self.viewspace_point_list[0])
                 for idx in range(len(self.viewspace_point_list)):
                     viewspace_point_tensor_grad = viewspace_point_tensor_grad + self.viewspace_point_list[idx].grad
@@ -277,6 +282,82 @@ class GaussianDreamer(BaseLift3DSystem):
         # self.gaussian.save_ply(save_path)
         # load_ply(save_path,self.get_save_path(f"it{self.true_global_step}-val-color.ply"))
 
+    def initial_views(self, num_views: int = None):
+        """
+        完全按照 RandomCameraDataset 的方式，
+        使用 numpy 生成一圈球面视角, 保存至init_views文件夹
+        """
+        from threestudio.data.uncond import pose_spherical
+        device = torch.device("cuda")
+
+        # ====== 1. 使用与 Dataset 一致的参数 ======
+        if num_views is None:
+            num_views = getattr(self.cfg, "n_test_views", 8)
+
+        azimuth_deg = np.linspace(0.0, 360.0, num_views, endpoint=False)
+        elevation_deg = np.full_like(azimuth_deg, float(15))
+        camera_distances = np.full_like(azimuth_deg, float(4))
+        fovy_deg = np.full_like(azimuth_deg, float(70))
+
+        # ====== 2. 构造 3DGS 的 c2w_3dgs （完全照 Dataset） ======
+        c2w_list = []
+
+        for i in range(num_views):
+            # >>> 和 RandomCameraDataset 完全一致 <<<
+            theta = float(azimuth_deg[i] + 180.0 - self.load_type * 90.0)
+            phi   = float(-elevation_deg[i])
+            radius = float(camera_distances[i])
+
+            render_pose = pose_spherical(theta, phi, radius)  # numpy 4×4
+
+            # 转 torch 继续下面步骤
+            render_pose_t = torch.tensor(render_pose, dtype=torch.float32, device=device)
+
+            # === 以下完全照 RandomCameraDataset ===
+            matrix = torch.linalg.inv(render_pose_t)
+            R = -torch.transpose(matrix[:3, :3], 0, 1)
+            R[:, 0] = -R[:, 0]
+            T = -matrix[:3, 3]
+
+            c2w = torch.cat([R, T[:, None]], dim=1)
+            bottom = torch.tensor([[0, 0, 0, 1]], dtype=torch.float32, device=device)
+            c2w = torch.cat([c2w, bottom], dim=0)
+
+            c2w_list.append(c2w)
+
+        c2w_3dgs = torch.stack(c2w_list, dim=0)  # [B, 4, 4]
+
+        # ===== 3. 渲染部分 =====
+        H = 512
+        W = 512
+        bg = self.background_tensor
+
+        fovy = torch.tensor(fovy_deg * math.pi / 180.0, device=device, dtype=torch.float32)
+
+        for i in range(num_views):
+            cam = Camera(
+                c2w=c2w_3dgs[i],
+                FoVy=fovy[i],
+                height=H,
+                width=W,
+            )
+
+            render_pkg = render(cam, self.gaussian, self.pipe, bg)
+            img = render_pkg["render"]  # [3, H, W]
+
+            self.save_image_grid(
+                f"init_views/{i:03d}.png",
+                [
+                    {
+                        "type": "rgb",
+                        "img": img.permute(1, 2, 0),
+                        "kwargs": {"data_format": "HWC"},
+                    }
+                ],
+                name="init_test",
+                step=i,
+            )
+    
     def on_validation_epoch_end(self):
         pass
 
